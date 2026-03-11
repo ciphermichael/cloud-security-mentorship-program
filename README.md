@@ -68,7 +68,7 @@ See [`shared/detection-queries/`](shared/detection-queries/) for:
 ## 🚀 Getting Started
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/cloud-security-mentorship-program
+git clone https://github.com/ciphermichael/cloud-security-mentorship-program
 cd cloud-security-mentorship-program
 
 # Install shared dependencies
