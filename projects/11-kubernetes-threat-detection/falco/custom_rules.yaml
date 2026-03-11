@@ -1,0 +1,268 @@
+# =============================================================================
+# Custom Falco Rules — Kubernetes Runtime Threat Detection
+# Week 12 Project — Cloud Security Mentorship Programme
+# =============================================================================
+# Install: helm install falco falcosecurity/falco --set-file falco.rules=/path/to/rules.yaml
+# Docs: https://falco.org/docs/rules/
+
+# ─── RULE 1: Shell Spawned Inside Container ───────────────────────────────────
+# MITRE: T1059 — Command and Scripting Interpreter
+# Any shell in a running container is suspicious (not baseline)
+
+- rule: Shell Spawned in Container
+  desc: >
+    A shell was spawned inside a running container. This is a strong indicator
+    of compromise — legitimate containers should not spawn interactive shells.
+  condition: >
+    spawned_process
+    and container
+    and container.image.repository not in (known_shell_spawning_images)
+    and proc.name in (shell_binaries)
+    and proc.pname not in (known_shell_spawning_processes)
+    and not proc.cmdline startswith "runc:[1:CHILD]"
+  output: >
+    Shell spawned inside container
+    (user=%user.name user_loginuid=%user.loginuid
+     shell=%proc.name parent=%proc.pname
+     container_id=%container.id
+     container_name=%container.name
+     image=%container.image.repository:%container.image.tag
+     cmdline=%proc.cmdline)
+  priority: WARNING
+  tags: [container, shell, T1059, mitre_execution]
+
+
+# ─── RULE 2: Container Running as Root ───────────────────────────────────────
+# MITRE: T1610 — Deploy Container | Privilege escalation risk
+
+- rule: Container Running as Root User
+  desc: >
+    A container is running as the root user (UID 0).
+    This significantly increases the blast radius of a container compromise.
+  condition: >
+    spawned_process
+    and container
+    and proc.vpid = 1
+    and user.uid = 0
+    and not container.image.repository in (trusted_root_images)
+  output: >
+    Container running as root
+    (user=%user.name container_id=%container.id
+     container_name=%container.name
+     image=%container.image.repository:%container.image.tag
+     pod=%k8s.pod.name namespace=%k8s.ns.name)
+  priority: WARNING
+  tags: [container, root, T1610, mitre_defense_evasion]
+
+
+# ─── RULE 3: Sensitive File Read Inside Container ─────────────────────────────
+# MITRE: T1552 — Unsecured Credentials | Detects credential theft attempts
+
+- rule: Sensitive File Read in Container
+  desc: >
+    A process inside a container read a sensitive file such as /etc/shadow,
+    SSH keys, or service account tokens — credential theft indicator.
+  condition: >
+    open_read
+    and container
+    and fd.name in (sensitive_files)
+    and not proc.name in (known_sensitive_file_readers)
+  output: >
+    Sensitive file read inside container
+    (user=%user.name process=%proc.name
+     file=%fd.name
+     container_id=%container.id
+     container_name=%container.name
+     image=%container.image.repository:%container.image.tag)
+  priority: ERROR
+  tags: [container, credentials, T1552, mitre_credential_access]
+
+
+# ─── RULE 4: Unexpected Outbound Network Connection ──────────────────────────
+# MITRE: T1071 — Application Layer Protocol (C2 communication)
+
+- rule: Unexpected Outbound Network Connection from Container
+  desc: >
+    A container made an outbound network connection to an IP not in its
+    approved allowlist. Could indicate C2 communication or data exfiltration.
+  condition: >
+    outbound
+    and container
+    and not fd.sip in (allowed_outbound_ips)
+    and not proc.name in (known_network_processes)
+    and fd.sport != 53  # Allow DNS
+    and not container.image.repository in (trusted_outbound_images)
+  output: >
+    Unexpected outbound connection from container
+    (user=%user.name process=%proc.name
+     connection=%fd.name
+     container_id=%container.id
+     container_name=%container.name
+     image=%container.image.repository:%container.image.tag)
+  priority: WARNING
+  tags: [container, network, T1071, mitre_c2]
+
+
+# ─── RULE 5: Crypto Mining Detection ─────────────────────────────────────────
+# MITRE: T1496 — Resource Hijacking | Detect crypto miner execution
+
+- rule: Crypto Mining Binary Detected
+  desc: >
+    A known crypto mining binary or process name was detected inside a container.
+    Attackers frequently use compromised containers for crypto mining.
+  condition: >
+    spawned_process
+    and container
+    and (
+      proc.name in (crypto_mining_binaries)
+      or proc.cmdline contains "stratum+"
+      or proc.cmdline contains "xmrig"
+      or proc.cmdline contains "minerd"
+      or proc.cmdline contains "--pool-url"
+      or proc.cmdline contains "cryptonight"
+    )
+  output: >
+    Crypto mining binary detected
+    (user=%user.name process=%proc.name
+     cmdline=%proc.cmdline
+     container_id=%container.id
+     container_name=%container.name
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [container, crypto, T1496, mitre_impact]
+
+
+# ─── RULE 6: kubectl exec Detected ───────────────────────────────────────────
+# MITRE: T1609 — Container Administration Command
+
+- rule: kubectl exec Detected
+  desc: >
+    Someone used kubectl exec to execute commands in a running container.
+    This is a high-risk action that bypasses normal CI/CD workflows.
+  condition: >
+    spawned_process
+    and container
+    and proc.name in (shell_binaries)
+    and proc.pname = "exe"
+    and proc.aname[2] = "kubectl"
+  output: >
+    kubectl exec command executed in container
+    (user=%user.name shell=%proc.name
+     cmdline=%proc.cmdline
+     container_id=%container.id
+     pod=%k8s.pod.name
+     namespace=%k8s.ns.name)
+  priority: WARNING
+  tags: [container, kubernetes, T1609, mitre_execution]
+
+
+# ─── RULE 7: Container Escape via Privileged Mount ───────────────────────────
+# MITRE: T1611 — Escape to Host
+
+- rule: Privileged Container with Host Mount
+  desc: >
+    A privileged container has a host filesystem mount — this combination
+    allows trivial container escape and full host compromise.
+  condition: >
+    container
+    and container.privileged = true
+    and fd.name startswith /host
+    and spawned_process
+  output: >
+    Privileged container with host mount — potential container escape
+    (user=%user.name process=%proc.name
+     container_id=%container.id
+     container_name=%container.name
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [container, escape, T1611, mitre_privilege_escalation]
+
+
+# ─── RULE 8: Write to /etc in Container ──────────────────────────────────────
+# Modifying /etc inside a container is suspicious (persistence attempt)
+
+- rule: Write to /etc in Container
+  desc: >
+    A process wrote to the /etc directory inside a container.
+    Attackers use this for persistence (e.g., /etc/cron.d, /etc/passwd).
+  condition: >
+    open_write
+    and container
+    and fd.name startswith /etc
+    and not proc.name in (package_mgmt_binaries)
+    and not container.image.repository in (init_containers)
+  output: >
+    Write to /etc inside container
+    (user=%user.name process=%proc.name
+     file=%fd.name
+     container_id=%container.id
+     container_name=%container.name)
+  priority: ERROR
+  tags: [container, persistence, T1543]
+
+
+# ─── MACROS ──────────────────────────────────────────────────────────────────
+
+- macro: outbound
+  condition: >
+    (evt.type = connect and evt.dir = <
+     and fd.typechar = 4
+     and fd.connected = true
+     and fd.name_changed = true
+     and (fd.cip != "0.0.0.0" and fd.cip != "::" and fd.cip != fd.sip))
+
+- macro: open_read
+  condition: >
+    (evt.type in (open, openat, openat2) and evt.is_open_read = true
+     and fd.typechar = 'f' and fd.num >= 0)
+
+- macro: open_write
+  condition: >
+    (evt.type in (open, openat, openat2) and evt.is_open_write = true
+     and fd.typechar = 'f' and fd.num >= 0)
+
+
+# ─── LISTS ───────────────────────────────────────────────────────────────────
+
+- list: shell_binaries
+  items: [ash, bash, csh, ksh, sh, tcsh, zsh, dash, fish]
+
+- list: crypto_mining_binaries
+  items: [xmrig, minerd, minergate, nheqminer, ccminer, bfgminer, cgminer,
+          ethminer, t-rex, nbminer, lolminer, gminer]
+
+- list: sensitive_files
+  items:
+    - /etc/shadow
+    - /etc/sudoers
+    - /root/.ssh/id_rsa
+    - /root/.aws/credentials
+    - /var/run/secrets/kubernetes.io/serviceaccount/token
+    - /proc/1/environ
+
+- list: package_mgmt_binaries
+  items: [apk, apt, apt-get, dpkg, yum, dnf, rpm, pip, pip3, npm, yarn, gem]
+
+- list: known_shell_spawning_images
+  items: [docker.io/library/busybox, docker.io/bitnami/kubectl]
+
+- list: known_shell_spawning_processes
+  items: [containerd-shim, runc, exe]
+
+- list: known_sensitive_file_readers
+  items: [sshd, login, sudo, su]
+
+- list: known_network_processes
+  items: [curl, wget, python3, java, node, nginx, apache2]
+
+- list: allowed_outbound_ips
+  items: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+- list: trusted_root_images
+  items: []
+
+- list: trusted_outbound_images
+  items: []
+
+- list: init_containers
+  items: []

@@ -1,0 +1,59 @@
+- id: CSOP-IAM-001
+  name: Root Account API Activity
+  description: Any API call from the root account — should never happen in normal operations.
+  severity: CRITICAL
+  mitre_technique: T1078.004
+  mitre_tactic: Privilege Escalation
+  conditions:
+    - {field: "userIdentity.type", operator: equals, value: Root}
+    - {field: eventType, operator: equals, value: AwsApiCall}
+  remediation: Investigate immediately. Delete root access keys. Enable SCPs to prevent root API use.
+  enabled: true
+
+- id: CSOP-IAM-002
+  name: CreatePolicyVersion — Policy Replacement Escalation
+  severity: CRITICAL
+  mitre_technique: T1078.004
+  mitre_tactic: Privilege Escalation
+  conditions:
+    - {field: eventSource, operator: equals, value: iam.amazonaws.com}
+    - {field: eventName, operator: equals, value: CreatePolicyVersion}
+    - {field: errorCode, operator: not_exists}
+  remediation: Restrict iam:CreatePolicyVersion. Review the new version immediately.
+  enabled: true
+
+- id: CSOP-IAM-003
+  name: AttachUserPolicy — Direct Policy Attachment
+  severity: CRITICAL
+  mitre_technique: T1078.004
+  mitre_tactic: Privilege Escalation
+  conditions:
+    - {field: eventSource, operator: equals, value: iam.amazonaws.com}
+    - {field: eventName, operator: equals, value: AttachUserPolicy}
+    - {field: errorCode, operator: not_exists}
+  remediation: Restrict iam:AttachUserPolicy via SCPs. Review attachment immediately.
+  enabled: true
+
+- id: CSOP-IAM-004
+  name: CloudTrail Logging Stopped
+  severity: CRITICAL
+  mitre_technique: T1562.008
+  mitre_tactic: Defence Evasion
+  conditions:
+    - {field: eventSource, operator: equals, value: cloudtrail.amazonaws.com}
+    - {field: eventName, operator: in, value: [StopLogging, DeleteTrail, UpdateTrail]}
+    - {field: errorCode, operator: not_exists}
+  remediation: Re-enable CloudTrail. Apply SCP to prevent StopLogging.
+  enabled: true
+
+- id: CSOP-IAM-005
+  name: New IAM User Created
+  severity: MEDIUM
+  mitre_technique: T1136.003
+  mitre_tactic: Persistence
+  conditions:
+    - {field: eventSource, operator: equals, value: iam.amazonaws.com}
+    - {field: eventName, operator: equals, value: CreateUser}
+    - {field: errorCode, operator: not_exists}
+  remediation: Verify via approved change ticket. Check if user needs MFA enforced.
+  enabled: true

@@ -1,0 +1,5 @@
+# Pipeline uses GitHub Actions — no local pip install
+# For local testing: pip install semgrep bandit pip-audit
+semgrep>=1.50.0
+bandit>=1.7.0
+pip-audit>=2.6.0

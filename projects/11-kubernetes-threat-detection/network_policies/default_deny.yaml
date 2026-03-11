@@ -1,0 +1,50 @@
+# Default-deny all ingress and egress in namespace
+# Apply to every namespace; then add explicit allow policies
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: production
+spec:
+  podSelector: {}   # Selects ALL pods in namespace
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Allow DNS egress (port 53) for all pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+---
+# Allow frontend → backend traffic only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-to-backend
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      tier: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: frontend
+      ports:
+        - port: 8080
+          protocol: TCP

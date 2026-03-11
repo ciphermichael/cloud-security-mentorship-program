@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+dist/
+build/
+
+# AWS
+*.pem
+*.key
+credentials
+.aws/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!example.tfvars
+
+# Reports
+reports/*.html
+reports/*.json
+reports/*.md
+sample_output/*.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

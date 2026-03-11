@@ -1,0 +1,293 @@
+# =============================================================================
+# DevSecOps Security Pipeline
+# Week 13 Project — Cloud Security Mentorship Programme
+#
+# 6-Stage Security Pipeline:
+#   1. Secret Scanning (gitleaks)
+#   2. SAST (Semgrep)
+#   3. SCA (pip-audit)
+#   4. IaC Scanning (Checkov)
+#   5. Container Scanning (Trivy)
+#   6. DAST (OWASP ZAP)
+#
+# Quality Gates: Pipeline FAILS on CRITICAL findings in any stage
+# =============================================================================
+
+name: DevSecOps Security Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  FAIL_ON_CRITICAL: true
+  REPORT_DIR: security-reports
+
+jobs:
+
+  # ─── STAGE 1: SECRET SCANNING ──────────────────────────────────────────────
+  secret-scanning:
+    name: "🔑 Stage 1: Secret Scanning"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for git log scanning
+
+      - name: Install gitleaks
+        run: |
+          wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz
+          tar -xzf gitleaks_8.18.4_linux_x64.tar.gz
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+      - name: Run gitleaks — scan entire git history
+        run: |
+          mkdir -p ${{ env.REPORT_DIR }}
+          gitleaks detect \
+            --source . \
+            --log-opts="--all" \
+            --report-format json \
+            --report-path ${{ env.REPORT_DIR }}/gitleaks-report.json \
+            --verbose \
+            --exit-code 1 || LEAKS_FOUND=$?
+          
+          if [ "${LEAKS_FOUND}" = "1" ]; then
+            echo "::error::🚨 SECRETS DETECTED in repository history!"
+            echo "::error::Immediately rotate any leaked credentials"
+            exit 1
+          fi
+          echo "✅ No secrets detected"
+
+      - name: Upload gitleaks report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gitleaks-report
+          path: ${{ env.REPORT_DIR }}/gitleaks-report.json
+
+  # ─── STAGE 2: SAST ─────────────────────────────────────────────────────────
+  sast-scanning:
+    name: "🔍 Stage 2: SAST (Semgrep)"
+    runs-on: ubuntu-latest
+    needs: secret-scanning
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            p/python
+            p/security-audit
+            p/owasp-top-ten
+            p/jwt
+            p/secrets
+          generateSarif: "1"
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Check for critical Semgrep findings
+        run: |
+          if [ -f semgrep.sarif ]; then
+            CRITICAL=$(python3 -c "
+          import json, sys
+          with open('semgrep.sarif') as f: data = json.load(f)
+          results = data.get('runs', [{}])[0].get('results', [])
+          critical = [r for r in results if r.get('level') == 'error']
+          print(len(critical))
+            ")
+            echo "Critical SAST findings: $CRITICAL"
+            if [ "$CRITICAL" -gt "0" ] && [ "${{ env.FAIL_ON_CRITICAL }}" = "true" ]; then
+              echo "::error::Pipeline blocked: $CRITICAL critical SAST findings require remediation"
+              exit 1
+            fi
+          fi
+
+  # ─── STAGE 3: SCA ──────────────────────────────────────────────────────────
+  sca-scanning:
+    name: "📦 Stage 3: SCA (Dependency Scanning)"
+    runs-on: ubuntu-latest
+    needs: secret-scanning
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install pip-audit safety
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run pip-audit
+        run: |
+          mkdir -p ${{ env.REPORT_DIR }}
+          pip-audit \
+            --format json \
+            --output ${{ env.REPORT_DIR }}/pip-audit-report.json \
+            --strict || PIP_EXIT=$?
+          
+          # Parse results
+          python3 -c "
+          import json, sys
+          try:
+              with open('${{ env.REPORT_DIR }}/pip-audit-report.json') as f:
+                  data = json.load(f)
+              vulns = data.get('vulnerabilities', [])
+              critical = [v for v in vulns if any(
+                  a.get('severity', '').upper() in ('CRITICAL', 'HIGH')
+                  for a in v.get('aliases', [{}])
+              )]
+              print(f'Total vulnerable packages: {len(vulns)}')
+              print(f'Critical/High: {len(critical)}')
+              if critical and '${{ env.FAIL_ON_CRITICAL }}' == 'true':
+                  sys.exit(1)
+          except Exception as e:
+              print(f'Error parsing report: {e}')
+          "
+
+      - name: Run OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: "cloud-security-app"
+          path: "."
+          format: "JSON"
+          out: ${{ env.REPORT_DIR }}/dependency-check
+          args: >
+            --failOnCVSS 9
+            --enableExperimental
+
+      - name: Upload SCA reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sca-reports
+          path: ${{ env.REPORT_DIR }}/
+
+  # ─── STAGE 4: IaC SCANNING ─────────────────────────────────────────────────
+  iac-scanning:
+    name: "🏗️ Stage 4: IaC Security (Checkov)"
+    runs-on: ubuntu-latest
+    needs: secret-scanning
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov IaC Scanner
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: terraform,cloudformation,kubernetes,helm,dockerfile
+          output_format: sarif
+          output_file_path: ${{ env.REPORT_DIR }}/checkov-report.sarif
+          soft_fail: false
+          skip_check: >-
+            CKV_AWS_144,CKV_AWS_145
+          # CKV_AWS_144: S3 cross-region replication (not needed in lab)
+          # CKV_AWS_145: S3 KMS with CMK (too strict for lab)
+
+      - name: Upload Checkov SARIF to GitHub
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ env.REPORT_DIR }}/checkov-report.sarif
+
+  # ─── STAGE 5: CONTAINER SCANNING ───────────────────────────────────────────
+  container-scanning:
+    name: "🐳 Stage 5: Container Scanning (Trivy)"
+    runs-on: ubuntu-latest
+    needs: [sast-scanning, sca-scanning, iac-scanning]
+    if: hashFiles('Dockerfile') != ''  # Only if Dockerfile exists
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t app:${{ github.sha }} .
+
+      - name: Run Trivy container scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: app:${{ github.sha }}
+          format: sarif
+          output: ${{ env.REPORT_DIR }}/trivy-container.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: ${{ env.REPORT_DIR }}/trivy-container.sarif
+
+      - name: Scan Docker image configuration (Trivy config)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: Dockerfile
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  # ─── STAGE 6: DAST ─────────────────────────────────────────────────────────
+  dast-scanning:
+    name: "🌐 Stage 6: DAST (OWASP ZAP)"
+    runs-on: ubuntu-latest
+    needs: [container-scanning]
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start application for DAST
+        run: |
+          docker compose up -d app
+          sleep 10  # Wait for app to start
+          curl --retry 5 --retry-delay 3 http://localhost:8080/health
+
+      - name: Run OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: "http://localhost:8080"
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-a -j"
+          fail_action: true
+          artifact_name: zap-baseline-report
+
+      - name: Upload ZAP report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dast-zap-report
+          path: report_html.html
+
+  # ─── FINAL: SECURITY SUMMARY ───────────────────────────────────────────────
+  security-summary:
+    name: "📊 Security Pipeline Summary"
+    runs-on: ubuntu-latest
+    needs: [secret-scanning, sast-scanning, sca-scanning, iac-scanning]
+    if: always()
+    steps:
+      - name: Generate summary report
+        run: |
+          echo "## 🛡️ DevSecOps Security Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Stage | Tool | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret Scanning | gitleaks | ${{ needs.secret-scanning.result == 'success' && '✅ PASSED' || '❌ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SAST | Semgrep | ${{ needs.sast-scanning.result == 'success' && '✅ PASSED' || '❌ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| SCA | pip-audit | ${{ needs.sca-scanning.result == 'success' && '✅ PASSED' || '❌ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| IaC | Checkov | ${{ needs.iac-scanning.result == 'success' && '✅ PASSED' || '❌ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\` | **Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> All findings available in the [Security tab](/${{ github.repository }}/security)" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,292 @@
+// =============================================================================
+// Azure Sentinel KQL Detection Rules Library
+// Project 06 — Cloud Security Mentorship Programme
+// MITRE ATT&CK for Cloud — Identity & Credential-Based Detections
+// =============================================================================
+
+
+// ─── RULE 1: Impossible Travel Detection ─────────────────────────────────────
+// MITRE: T1078 — Valid Accounts | Tactic: Initial Access, Defence Evasion
+// Detects sign-in from two geographically impossible locations within 1 hour
+// Severity: HIGH
+
+let timeframe = 1h;
+let impossible_speed_kmh = 900; // Faster than a commercial jet = impossible
+SigninLogs
+| where TimeGenerated > ago(timeframe)
+| where ResultType == 0  // Successful sign-ins only
+| where UserPrincipalName !endswith "#EXT#@"  // Exclude guest accounts
+| extend Latitude  = toreal(LocationDetails.geoCoordinates.latitude)
+| extend Longitude = toreal(LocationDetails.geoCoordinates.longitude)
+| extend Country   = tostring(LocationDetails.countryOrRegion)
+| extend City      = tostring(LocationDetails.city)
+| where isnotempty(Latitude) and isnotempty(Longitude)
+| order by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend PrevLat     = prev(Latitude,    1)
+| extend PrevLon     = prev(Longitude,   1)
+| extend PrevTime    = prev(TimeGenerated, 1)
+| extend PrevUser    = prev(UserPrincipalName, 1)
+| extend PrevCountry = prev(Country, 1)
+| where PrevUser == UserPrincipalName
+| extend TimeDiffHours = datetime_diff("minute", TimeGenerated, PrevTime) / 60.0
+| extend DistanceKm    = geo_distance_2points(Longitude, Latitude, PrevLon, PrevLat) / 1000.0
+| extend SpeedKmH      = iif(TimeDiffHours > 0, DistanceKm / TimeDiffHours, 0.0)
+| where SpeedKmH > impossible_speed_kmh
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    CurrentCountry  = Country,
+    PreviousCountry = PrevCountry,
+    DistanceKm      = round(DistanceKm, 0),
+    SpeedKmH        = round(SpeedKmH, 0),
+    TimeDiffMinutes = round(TimeDiffHours * 60, 0),
+    AppDisplayName,
+    IPAddress
+| extend AlertTitle = strcat("Impossible Travel: ", UserPrincipalName,
+                             " (", round(SpeedKmH, 0), " km/h)")
+| order by TimeGenerated desc
+
+
+// ─── RULE 2: Brute Force Attack Detection ────────────────────────────────────
+// MITRE: T1110 — Brute Force | Tactic: Credential Access
+// Detects >10 failed sign-ins within 5 minutes from the same IP
+// Severity: HIGH
+
+let threshold = 10;
+let window = 5m;
+SigninLogs
+| where TimeGenerated > ago(1h)
+| where ResultType != 0  // Failed sign-ins
+| where ResultType !in ("50126", "50053")  // Exclude locked accounts (already detected)
+| summarize
+    FailedAttempts  = count(),
+    TargetAccounts  = dcount(UserPrincipalName),
+    AccountsList    = make_set(UserPrincipalName, 10),
+    ErrorCodes      = make_set(ResultDescription, 5),
+    FirstAttempt    = min(TimeGenerated),
+    LastAttempt     = max(TimeGenerated)
+  by IPAddress, bin(TimeGenerated, window)
+| where FailedAttempts >= threshold
+| extend DurationMinutes = datetime_diff("minute", LastAttempt, FirstAttempt)
+| extend AlertTitle = strcat("Brute Force: ", FailedAttempts, " failures from ", IPAddress)
+| order by FailedAttempts desc
+
+
+// ─── RULE 3: Privileged Role Assignment Outside Business Hours ────────────────
+// MITRE: T1098.003 — Account Manipulation: Add Office 365 Global Admin
+// Tactic: Persistence | Severity: HIGH
+
+let business_start = 8;   // 08:00
+let business_end   = 18;  // 18:00
+let high_priv_roles = dynamic([
+    "Global Administrator",
+    "Privileged Role Administrator",
+    "Security Administrator",
+    "Exchange Administrator",
+    "SharePoint Administrator",
+    "Conditional Access Administrator"
+]);
+AuditLogs
+| where TimeGenerated > ago(7d)
+| where OperationName == "Add member to role"
+| where Result == "success"
+| extend RoleName    = tostring(TargetResources[0].displayName)
+| extend AssignedTo  = tostring(TargetResources[1].userPrincipalName)
+| extend InitiatedBy = tostring(InitiatedBy.user.userPrincipalName)
+| extend HourOfDay   = hourofday(TimeGenerated)
+| extend DayOfWeek   = dayofweek(TimeGenerated)
+| where RoleName in (high_priv_roles)
+| where HourOfDay < business_start or HourOfDay >= business_end
+       or DayOfWeek == 0d or DayOfWeek == 6d  // Weekend
+| project
+    TimeGenerated,
+    RoleName,
+    AssignedTo,
+    InitiatedBy,
+    HourOfDay,
+    DayOfWeek = case(DayOfWeek==0d,"Sunday", DayOfWeek==6d,"Saturday", "Weekday"),
+    AlertTitle = strcat("After-Hours Role Assignment: ", RoleName, " to ", AssignedTo)
+| order by TimeGenerated desc
+
+
+// ─── RULE 4: Service Principal Credential Modification ───────────────────────
+// MITRE: T1098.001 — Account Manipulation: Additional Cloud Credentials
+// Tactic: Persistence | Severity: HIGH
+
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName in (
+    "Add service principal credentials",
+    "Update service principal",
+    "Add application",
+    "Update application – Certificates and secrets management"
+  )
+| where Result == "success"
+| extend ServicePrincipal = tostring(TargetResources[0].displayName)
+| extend InitiatedBy      = tostring(InitiatedBy.user.userPrincipalName)
+| extend ModifiedProperty = tostring(TargetResources[0].modifiedProperties[0].displayName)
+| project
+    TimeGenerated,
+    OperationName,
+    ServicePrincipal,
+    InitiatedBy,
+    ModifiedProperty,
+    AlertTitle = strcat("SP Credential Modified: ", ServicePrincipal, " by ", InitiatedBy)
+| order by TimeGenerated desc
+
+
+// ─── RULE 5: Mass File Download — Potential Data Exfiltration ────────────────
+// MITRE: T1530 — Data from Cloud Storage | Tactic: Exfiltration
+// Severity: HIGH
+
+let download_threshold = 100;
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull", "FileAccessed")
+| where RecordType == "SharePointFileOperation"
+| summarize
+    DownloadCount  = count(),
+    UniqueFiles    = dcount(OfficeObjectId),
+    Sites          = make_set(SiteUrl, 5),
+    FirstDownload  = min(TimeGenerated),
+    LastDownload   = max(TimeGenerated)
+  by UserId, bin(TimeGenerated, 1h)
+| where DownloadCount > download_threshold
+| extend DurationMinutes = datetime_diff("minute", LastDownload, FirstDownload)
+| extend RatePerMinute   = round(toreal(DownloadCount) / max_of(DurationMinutes, 1), 1)
+| extend AlertTitle = strcat("Mass Download: ", UserId,
+                             " downloaded ", DownloadCount, " files")
+| order by DownloadCount desc
+
+
+// ─── RULE 6: AWS IAM Escalation Detected via Sentinel AWS Connector ──────────
+// MITRE: T1078.004 | Tactic: Privilege Escalation | Severity: CRITICAL
+// Requires: AWS CloudTrail → S3 → Sentinel connector
+
+AWSCloudTrail
+| where TimeGenerated > ago(24h)
+| where EventSource == "iam.amazonaws.com"
+| where EventName in (
+    "CreatePolicyVersion", "SetDefaultPolicyVersion",
+    "AttachUserPolicy", "AttachRolePolicy",
+    "PutUserPolicy", "CreateAccessKey",
+    "UpdateLoginProfile", "AddUserToGroup"
+  )
+| where isempty(ErrorCode)  // Successful calls only
+| extend ActorARN = tostring(parse_json(UserIdentityArn))
+| extend UserType = tostring(parse_json(UserIdentityType))
+| extend SourceIP = tostring(parse_json(SourceIPAddress))
+| where UserType != "Root"
+| project
+    TimeGenerated,
+    EventName,
+    ActorARN,
+    SourceIP,
+    UserAgent,
+    RequestParameters,
+    AlertTitle = strcat("IAM Escalation Event: ", EventName, " by ", ActorARN)
+| order by TimeGenerated desc
+
+
+// ─── RULE 7: New User Created and Immediately Given Admin Rights ──────────────
+// Correlation rule — detects fast privilege escalation after account creation
+// MITRE: T1136 — Create Account | Severity: CRITICAL
+
+let correlation_window = 30m;
+let user_creations =
+    AuditLogs
+    | where TimeGenerated > ago(24h)
+    | where OperationName == "Add user"
+    | where Result == "success"
+    | extend NewUser = tostring(TargetResources[0].userPrincipalName)
+    | extend CreatedBy = tostring(InitiatedBy.user.userPrincipalName)
+    | project CreateTime = TimeGenerated, NewUser, CreatedBy;
+let role_assignments =
+    AuditLogs
+    | where TimeGenerated > ago(24h)
+    | where OperationName == "Add member to role"
+    | where Result == "success"
+    | extend AssignedUser = tostring(TargetResources[1].userPrincipalName)
+    | extend RoleName     = tostring(TargetResources[0].displayName)
+    | project AssignTime = TimeGenerated, AssignedUser, RoleName;
+user_creations
+| join kind=inner role_assignments
+    on $left.NewUser == $right.AssignedUser
+| where AssignTime > CreateTime
+| extend MinutesBetween = datetime_diff("minute", AssignTime, CreateTime)
+| where MinutesBetween <= 30
+| extend AlertTitle = strcat("Fast Privilege Escalation: New user ", NewUser,
+                             " given ", RoleName, " within ", MinutesBetween, " min")
+| project CreateTime, AssignTime, NewUser, RoleName, MinutesBetween, CreatedBy, AlertTitle
+
+
+// ─── RULE 8: Anonymous IP Sign-In ────────────────────────────────────────────
+// MITRE: T1090 — Proxy | Tactic: Defence Evasion | Severity: MEDIUM
+
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0  // Successful
+| where RiskEventTypes_V2 contains "anonymizedIPAddress"
+      or NetworkLocationDetails contains "anonymizedIPAddress"
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    Country,
+    AppDisplayName,
+    AlertTitle = strcat("Anonymous IP Sign-In: ", UserPrincipalName, " from ", IPAddress)
+| order by TimeGenerated desc
+
+
+// ─── RULE 9: Disabled MFA Sign-In (Conditional Access Bypass) ────────────────
+// MITRE: T1556 — Modify Authentication Process | Severity: HIGH
+
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == 0
+| where AuthenticationRequirement == "singleFactorAuthentication"
+| where ConditionalAccessStatus == "success"
+| where UserPrincipalName !endswith "#EXT#@"
+| join kind=leftouter (
+    AuditLogs
+    | where OperationName == "Delete MFA"
+    | where TimeGenerated > ago(24h)
+    | extend UserWhoDeletedMFA = tostring(TargetResources[0].userPrincipalName)
+    | project UserWhoDeletedMFA, MFADeleteTime = TimeGenerated
+  ) on $left.UserPrincipalName == $right.UserWhoDeletedMFA
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    AppDisplayName,
+    MFADeleted = isnotempty(UserWhoDeletedMFA),
+    MFADeleteTime,
+    AlertTitle = strcat("MFA Bypass Detected: ", UserPrincipalName)
+
+
+// ─── RULE 10: Insider Threat — After-Hours Sensitive Data Access ──────────────
+// MITRE: T1078 | Tactic: Collection | Severity: MEDIUM
+
+let work_start = 7;
+let work_end   = 20;
+let sensitive_labels = dynamic(["Confidential", "Highly Confidential", "Secret"]);
+OfficeActivity
+| where TimeGenerated > ago(7d)
+| where Operation in ("FileDownloaded", "FileAccessed", "FilePreviewed")
+| where hourofday(TimeGenerated) < work_start
+      or hourofday(TimeGenerated) >= work_end
+      or dayofweek(TimeGenerated) in (0d, 6d)
+| where SensitivityLabelName in (sensitive_labels)
+      or OfficeObjectId contains "Confidential"
+      or OfficeObjectId contains "Finance"
+      or OfficeObjectId contains "HR"
+| summarize
+    AfterHoursAccesses = count(),
+    Files = make_set(OfficeObjectId, 5)
+  by UserId, bin(TimeGenerated, 1d)
+| where AfterHoursAccesses > 5
+| extend AlertTitle = strcat("After-Hours Sensitive Access: ", UserId,
+                             " (", AfterHoursAccesses, " files)")
+| order by AfterHoursAccesses desc

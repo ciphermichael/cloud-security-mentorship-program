@@ -1,0 +1,2 @@
+# KQL rules — no Python dependencies
+# Install: Azure CLI, az extension add --name sentinel

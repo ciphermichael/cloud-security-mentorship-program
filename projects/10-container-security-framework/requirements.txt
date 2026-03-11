@@ -1,0 +1,3 @@
+# Container tooling — install via package managers
+# pip install trivy-python
+# helm install falco falcosecurity/falco

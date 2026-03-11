@@ -1,0 +1,105 @@
+| Comment =====================================================================
+| Splunk SPL — Cloud Security Threat Hunting Queries
+| Cloud Security Mentorship Programme
+| Index: cloudtrail  Source: AWS CloudTrail JSON
+| =============================================================================
+
+|Comment ── QUERY 1: IAM Privilege Escalation ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    eventSource="iam.amazonaws.com"
+    eventName IN ("CreatePolicyVersion","SetDefaultPolicyVersion","AttachUserPolicy",
+                  "AttachRolePolicy","PutUserPolicy","CreateAccessKey","UpdateLoginProfile")
+    NOT errorCode=*
+| eval actor=mvindex(split(userIdentity.arn,":"),5)
+| stats count AS events, values(eventName) AS actions, values(sourceIPAddress) AS source_ips
+    BY userIdentity.arn, bin(_time, 1h)
+| where events > 1
+| sort -events
+| table _time, userIdentity.arn, actor, actions, events, source_ips
+
+|Comment ── QUERY 2: Root Account Activity ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    userIdentity.type="Root"
+    eventType="AwsApiCall"
+| table _time, eventName, eventSource, sourceIPAddress, awsRegion, userAgent
+| sort -_time
+
+|Comment ── QUERY 3: After-Hours Insider Threat Activity ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    userIdentity.type="IAMUser"
+    NOT errorCode=*
+| eval hour=strftime(_time,"%H"), dow=strftime(_time,"%w")
+| where (hour<7 OR hour>=20) OR dow=0 OR dow=6
+| eval is_sensitive=if(eventSource IN ("secretsmanager.amazonaws.com","kms.amazonaws.com","iam.amazonaws.com"),1,0)
+| stats count AS total_events, sum(is_sensitive) AS sensitive_events,
+         values(eventName) AS actions, dc(eventSource) AS services_used
+    BY userIdentity.userName, bin(_time, 1d)
+| where total_events > 10 OR sensitive_events > 2
+| sort -sensitive_events, -total_events
+
+|Comment ── QUERY 4: S3 Mass Download — Exfiltration Detection ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    eventSource="s3.amazonaws.com" eventName="GetObject"
+    NOT errorCode=*
+| stats count AS downloads, dc(requestParameters.key) AS unique_files,
+         dc(requestParameters.bucketName) AS buckets, values(sourceIPAddress) AS ips
+    BY userIdentity.arn, bin(_time, 30m)
+| where downloads > 100
+| eval rate_per_min=round(downloads/30,1)
+| sort -downloads
+| table _time, userIdentity.arn, downloads, unique_files, buckets, rate_per_min, ips
+
+|Comment ── QUERY 5: Brute Force — Repeated ConsoleLogin Failures ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    eventName="ConsoleLogin"
+    responseElements.ConsoleLogin="Failure"
+| stats count AS failures, dc(userIdentity.userName) AS targeted_users,
+         values(userIdentity.userName) AS usernames
+    BY sourceIPAddress, bin(_time, 5m)
+| where failures >= 5
+| sort -failures
+
+|Comment ── QUERY 6: CloudTrail Tampering ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    eventSource="cloudtrail.amazonaws.com"
+    eventName IN ("StopLogging","DeleteTrail","UpdateTrail","PutEventSelectors","DeleteEventDataStore")
+| table _time, eventName, userIdentity.arn, sourceIPAddress, awsRegion, requestParameters
+| sort -_time
+
+|Comment ── QUERY 7: EC2 Crypto Mining — GPU Instance Launch ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    eventSource="ec2.amazonaws.com" eventName="RunInstances"
+    NOT errorCode=*
+| spath requestParameters.instancesSet.items{}.instanceType
+    output=instance_type
+| where like(instance_type,"p3%") OR like(instance_type,"g4%") OR like(instance_type,"p4%")
+| table _time, userIdentity.arn, instance_type, awsRegion, sourceIPAddress
+
+|Comment ── QUERY 8: Access Key Created on Different User (Escalation) ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    eventSource="iam.amazonaws.com" eventName="CreateAccessKey"
+    NOT errorCode=*
+| eval actor_user=mvindex(split(userIdentity.arn,"/"),-1)
+| eval target_user=requestParameters.userName
+| where isnotnull(target_user) AND target_user!=actor_user
+| table _time, userIdentity.arn, actor_user, target_user, sourceIPAddress
+| eval alert="CROSS-USER KEY CREATION — potential escalation"
+| sort -_time
+
+|Comment ── QUERY 9: GuardDuty High Severity Findings ──
+index=guardduty sourcetype=aws:guardduty
+    severity>=7
+| eval severity_label=case(severity>=9,"CRITICAL",severity>=7,"HIGH",severity>=4,"MEDIUM",true(),"LOW")
+| stats count AS findings, values(title) AS finding_titles
+    BY severity_label, resource.instanceDetails.instanceId, service.action.networkConnectionAction.remoteIpDetails.ipAddressV4
+| sort -severity_label
+
+|Comment ── QUERY 10: STS Role Chaining — Lateral Movement ──
+index=cloudtrail sourcetype=aws:cloudtrail
+    eventSource="sts.amazonaws.com" eventName="AssumeRole"
+    NOT errorCode=*
+| stats count AS assumptions, dc(requestParameters.roleArn) AS unique_roles,
+         values(requestParameters.roleArn) AS roles_assumed
+    BY userIdentity.arn, bin(_time, 1h)
+| where unique_roles >= 3
+| sort -unique_roles

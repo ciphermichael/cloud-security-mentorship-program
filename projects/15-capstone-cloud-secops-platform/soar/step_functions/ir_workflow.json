@@ -1,0 +1,90 @@
+{
+  "Comment": "CSOP Incident Response Workflow — EC2 Compromise Playbook",
+  "StartAt": "AssessSevertiy",
+  "States": {
+    "AssessSevertiy": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.detail.severity",
+          "NumericGreaterThanEquals": 7,
+          "Next": "QuarantineInstance"
+        }
+      ],
+      "Default": "LogFinding"
+    },
+    "QuarantineInstance": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "csop-ir-quarantine",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.quarantine",
+      "Next": "PreserveEvidence",
+      "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "NotifyError"}]
+    },
+    "PreserveEvidence": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "csop-ir-preserve-evidence",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.evidence",
+      "Next": "EnrichWithThreatIntel"
+    },
+    "EnrichWithThreatIntel": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "csop-ti-enricher",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.threat_intel",
+      "Next": "NotifySecurityTeam"
+    },
+    "NotifySecurityTeam": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SNS_TOPIC_ARN}",
+        "Message.$": "States.Format('CRITICAL: EC2 Instance Quarantined. Instance: {}. Evidence: {}', $.detail.resource.instanceDetails.instanceId, $.evidence.Payload.snapshots)"
+      },
+      "Next": "WaitForAcknowledgement"
+    },
+    "WaitForAcknowledgement": {
+      "Type": "Wait",
+      "Seconds": 3600,
+      "Next": "EscalateIfUnacknowledged"
+    },
+    "EscalateIfUnacknowledged": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "csop-ir-escalate",
+        "Payload.$": "$"
+      },
+      "End": true
+    },
+    "LogFinding": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "csop-ir-log",
+        "Payload.$": "$"
+      },
+      "End": true
+    },
+    "NotifyError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SNS_TOPIC_ARN}",
+        "Message": "IR PLAYBOOK ERROR — manual intervention required. Check Step Functions logs."
+      },
+      "End": true
+    }
+  }
+}
