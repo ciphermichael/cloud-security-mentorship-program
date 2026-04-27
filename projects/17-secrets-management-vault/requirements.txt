@@ -1,0 +1,4 @@
+hvac==2.1.0
+boto3==1.34.69
+pytest==8.1.1
+moto[iam,lambda]==5.0.5
