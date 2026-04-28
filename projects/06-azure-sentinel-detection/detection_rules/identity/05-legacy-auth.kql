@@ -1,0 +1,23 @@
+// Rule 05 — Legacy Authentication Protocol Used
+// Legacy auth (Basic, NTLM) bypasses MFA — high-value attack vector
+// MITRE: T1078 — Valid Accounts | Tactic: Initial Access
+// Severity: Medium | Schedule: Every 1 hour | Lookback: 24 hours
+
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == "0"
+| where ClientAppUsed in (
+    "Exchange ActiveSync",
+    "IMAP4",
+    "MAPI",
+    "Other clients",
+    "POP3",
+    "SMTP AUTH",
+    "Authenticated SMTP"
+  )
+| summarize
+    LoginCount = count(),
+    Apps       = make_set(AppDisplayName),
+    IPs        = make_set(IPAddress)
+  by UserPrincipalName, ClientAppUsed
+| order by LoginCount desc

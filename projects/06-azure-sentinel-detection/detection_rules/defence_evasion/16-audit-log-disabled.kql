@@ -1,0 +1,19 @@
+// Rule 16 — Unified Audit Log Disabled
+// Disabling audit logging removes investigative visibility — critical evasion
+// MITRE: T1562.008 — Disable Cloud Logs | Tactic: Defence Evasion
+// Severity: Critical | Schedule: Every 5 min (NRT)
+
+OfficeActivity
+| where TimeGenerated > ago(1h)
+| where Operation == "Set-AdminAuditLogConfig"
+| where Parameters has "UnifiedAuditLogIngestionPolicy"
+| extend
+    Actor      = UserId,
+    NewValue   = tostring(
+        parse_json(Parameters)
+        | where Name == "UnifiedAuditLogIngestionPolicy"
+        | project Value
+    )
+| where NewValue =~ "Disabled"
+| project TimeGenerated, Actor, NewValue, ClientIP
+| order by TimeGenerated desc

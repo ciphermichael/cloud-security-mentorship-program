@@ -1,0 +1,21 @@
+// Rule 09 — Mass Mailbox Forwarding Rules Created
+// Email forwarding to external address — BEC / data exfiltration indicator
+// MITRE: T1114.003 — Email Forwarding Rule | Tactic: Collection
+// Severity: High | Schedule: Every 1 hour | Lookback: 24 hours
+
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation == "New-InboxRule"
+| where Parameters has_any ("ForwardTo", "RedirectTo", "ForwardAsAttachmentTo")
+| extend
+    User       = UserId,
+    RuleName   = tostring(parse_json(Parameters)[0].Value),
+    ForwardTo  = tostring(
+        parse_json(Parameters)
+        | where Name in ("ForwardTo","RedirectTo","ForwardAsAttachmentTo")
+        | limit 1
+        | project Value
+    )
+| where ForwardTo !endswith "@yourcompany.com"  // Adjust to your domain
+| project TimeGenerated, User, RuleName, ForwardTo, ClientIP
+| order by TimeGenerated desc

@@ -1,0 +1,15 @@
+// Rule 18 — Security Contact / Alert Email Changed
+// Changing the security alert destination can blind the security team
+// MITRE: T1562 — Impair Defences | Tactic: Defence Evasion
+// Severity: High | Schedule: Every 1 hour | Lookback: 24 hours
+
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName has_any ("security contact", "alert notification", "security policy")
+| where Result == "success"
+| extend
+    Actor      = tostring(InitiatedBy.user.userPrincipalName),
+    ActorIP    = tostring(InitiatedBy.user.ipAddress),
+    Target     = tostring(TargetResources[0].displayName)
+| project TimeGenerated, Actor, ActorIP, OperationName, Target
+| order by TimeGenerated desc

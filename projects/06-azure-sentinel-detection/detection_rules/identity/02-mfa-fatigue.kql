@@ -1,0 +1,31 @@
+// Rule 02 — MFA Fatigue Attack
+// Detects users receiving excessive MFA push notifications (adversary hoping user accepts)
+// MITRE: T1621 — MFA Request Generation | Tactic: Credential Access
+// Severity: High | Schedule: Every 30 min | Lookback: 1 hour
+
+let threshold = 10;
+
+AADNonInteractiveUserSignInLogs
+| where TimeGenerated > ago(1h)
+| where AuthenticationRequirement == "multiFactorAuthentication"
+| where ResultType in ("50074", "50076", "500121")
+| summarize
+    MFA_Challenges = count(),
+    SourceIPs      = make_set(IPAddress),
+    Apps           = make_set(AppDisplayName),
+    FirstChallenge = min(TimeGenerated),
+    LastChallenge  = max(TimeGenerated)
+  by UserPrincipalName
+| where MFA_Challenges >= threshold
+| extend
+    DurationMinutes = datetime_diff('minute', LastChallenge, FirstChallenge),
+    Alert = strcat("MFA Fatigue: ", MFA_Challenges, " challenges in 1h")
+| project
+    LastChallenge,
+    UserPrincipalName,
+    MFA_Challenges,
+    DurationMinutes,
+    SourceIPs,
+    Apps,
+    Alert
+| order by MFA_Challenges desc

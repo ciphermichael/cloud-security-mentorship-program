@@ -1,0 +1,27 @@
+// Rule 14 — Privileged Role Assignment Outside Business Hours
+// Admin role granted at night or weekends — policy violation indicator
+// MITRE: T1098 — Account Manipulation | Tactic: Privilege Escalation
+// Severity: High | Schedule: Every 1 hour | Lookback: 24 hours
+
+let business_start = 8;   // 08:00 UTC
+let business_end   = 18;  // 18:00 UTC
+
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName has "role"
+| where Result == "success"
+| extend HourOfDay = datetime_part("hour", TimeGenerated)
+| extend DayOfWeek = dayofweek(TimeGenerated)
+| where HourOfDay < business_start or HourOfDay >= business_end
+    or DayOfWeek == 0d   // Sunday
+    or DayOfWeek == 6d   // Saturday (1d = Mon, 6d = Sat, 0d = Sun)
+| mv-expand TargetResources
+| extend
+    Target    = tostring(TargetResources.userPrincipalName),
+    Role      = tostring(
+        parse_json(tostring(TargetResources.modifiedProperties))[0].newValue
+    ),
+    Actor     = tostring(InitiatedBy.user.userPrincipalName)
+| where Role has_any ("Administrator", "Owner", "Privileged")
+| project TimeGenerated, HourOfDay, DayOfWeek, Actor, Target, Role
+| order by TimeGenerated desc

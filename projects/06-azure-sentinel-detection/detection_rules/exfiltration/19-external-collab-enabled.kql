@@ -1,0 +1,19 @@
+// Rule 19 — External Collaboration Suddenly Enabled
+// B2B/external sharing turned on by non-admin — data leak risk
+// MITRE: T1537 — Transfer Data to Cloud Account | Tactic: Exfiltration
+// Severity: Medium | Schedule: Every 4 hours | Lookback: 24 hours
+
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName == "Set Company Information"
+| where Result == "success"
+| mv-expand ModifiedProperties = TargetResources[0].modifiedProperties
+| where ModifiedProperties.displayName =~ "AllowInvitesFrom"
+| extend
+    OldValue = tostring(ModifiedProperties.oldValue),
+    NewValue = tostring(ModifiedProperties.newValue),
+    Actor    = tostring(InitiatedBy.user.userPrincipalName),
+    ActorIP  = tostring(InitiatedBy.user.ipAddress)
+| where NewValue !in ('"adminsAndGuestInviters"', '"adminsGuestInvitersAndAllMembers"')
+| project TimeGenerated, Actor, ActorIP, OldValue, NewValue
+| order by TimeGenerated desc

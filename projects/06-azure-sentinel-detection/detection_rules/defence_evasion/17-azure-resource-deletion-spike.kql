@@ -1,0 +1,18 @@
+// Rule 17 — Azure Resource Deletion Spike
+// Unusual volume of resource deletions — potential destructive attack or cover tracks
+// MITRE: T1485 — Data Destruction | Tactic: Impact
+// Severity: High | Schedule: Every 30 min | Lookback: 1 hour
+
+let delete_threshold = 10;
+
+AzureActivity
+| where TimeGenerated > ago(1h)
+| where OperationNameValue endswith "/DELETE"
+| where ActivityStatusValue == "Succeeded"
+| summarize
+    DeleteCount    = count(),
+    ResourceTypes  = make_set(ResourceProviderValue, 10),
+    ResourceGroups = make_set(ResourceGroup, 5)
+  by Caller, CallerIpAddress, bin(TimeGenerated, 15m)
+| where DeleteCount >= delete_threshold
+| order by DeleteCount desc

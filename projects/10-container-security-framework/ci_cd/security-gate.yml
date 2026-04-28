@@ -1,0 +1,66 @@
+name: Container Security Gate
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  container-security:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t app:${{ github.sha }} secure_dockerfiles/python_app/
+
+      - name: Verify non-root user
+        run: |
+          USER=$(docker inspect app:${{ github.sha }} --format '{{.Config.User}}')
+          if [ -z "$USER" ] || [ "$USER" = "root" ] || [ "$USER" = "0" ]; then
+            echo "::error::Container runs as root — set USER in Dockerfile"
+            exit 1
+          fi
+          echo "OK: Container user: $USER"
+
+      - name: Scan image with Trivy (CRITICAL blocks)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: app:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Scan Dockerfile for misconfigs
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: secure_dockerfiles/python_app/
+          format: sarif
+          output: trivy-config.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+      - name: Validate Falco rules syntax
+        run: |
+          if command -v falco &>/dev/null; then
+            falco -r falco_rules/custom_container_rules.yaml --validate
+            echo "OK: Falco rules valid"
+          else
+            echo "INFO: Falco not installed in CI — skipping rule validation"
+          fi
+
+      - name: Upload SARIF reports
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: '.'
+          category: container-security

@@ -1,0 +1,17 @@
+// Rule 10 — SharePoint / OneDrive Mass Download
+// User downloads unusually large number of files — potential data theft
+// MITRE: T1530 — Data from Cloud Storage | Tactic: Collection
+// Severity: High | Schedule: Every 1 hour | Lookback: 24 hours
+
+let download_threshold = 100;
+
+OfficeActivity
+| where TimeGenerated > ago(24h)
+| where Operation in ("FileDownloaded", "FileSyncDownloadedFull")
+| summarize
+    DownloadCount = count(),
+    SiteUrls      = make_set(SiteUrl, 5),
+    FileList      = make_set(OfficeObjectId, 10)
+  by UserId, ClientIP, bin(TimeGenerated, 1h)
+| where DownloadCount >= download_threshold
+| order by DownloadCount desc

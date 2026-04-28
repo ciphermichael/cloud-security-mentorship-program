@@ -1,0 +1,22 @@
+// Rule 04 — Global Admin Role Assignment
+// Alert when Global Administrator role is assigned — highest severity event in Entra ID
+// MITRE: T1098 — Account Manipulation | Tactic: Privilege Escalation
+// Severity: Critical | Schedule: Every 5 min (NRT) | Lookback: 1 hour
+
+AuditLogs
+| where TimeGenerated > ago(1h)
+| where OperationName in ("Add member to role", "Add eligible member to role")
+| where Result == "success"
+| mv-expand TargetResources
+| where TargetResources.type == "User"
+| extend
+    TargetUser = tostring(TargetResources.userPrincipalName),
+    RoleAdded  = tostring(
+        parse_json(tostring(TargetResources.modifiedProperties))[0].newValue
+    )
+| where RoleAdded has "Global Administrator"
+| extend
+    Actor   = tostring(InitiatedBy.user.userPrincipalName),
+    ActorIP = tostring(InitiatedBy.user.ipAddress)
+| project TimeGenerated, Actor, ActorIP, TargetUser, RoleAdded
+| order by TimeGenerated desc

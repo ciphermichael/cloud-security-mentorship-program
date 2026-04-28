@@ -1,0 +1,104 @@
+# Kubernetes RBAC — Least-Privilege Role Examples
+# Project: 11-kubernetes-threat-detection
+# Apply with: kubectl apply -f rbac/least-privilege-roles.yaml
+
+---
+# Role: read-only access to pods and logs in a namespace
+# Use case: monitoring agent, log shipper
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: production
+  name: pod-reader
+  labels:
+    security.company.com/managed: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: production
+  name: monitoring-agent-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: monitoring-agent
+    namespace: monitoring
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Role: deploy-only — can update Deployments but NOT create or delete
+# Use case: CI/CD pipeline service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: production
+  name: deployer
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  # Explicitly NO: create, delete, deletecollection, watch secrets
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: production
+  name: cicd-deployer
+subjects:
+  - kind: ServiceAccount
+    name: github-actions-deploy
+    namespace: ci-cd
+roleRef:
+  kind: Role
+  name: deployer
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRole: view-only across all namespaces (for security scanners)
+# Never bind this to user-facing service accounts in production
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: security-auditor
+  labels:
+    security.company.com/managed: "true"
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "serviceaccounts",
+                "namespaces", "nodes", "events"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list"]
+  # Explicitly NOT secrets — auditors should not see secret values
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: security-auditor-binding
+subjects:
+  - kind: ServiceAccount
+    name: cluster-auditor
+    namespace: security
+roleRef:
+  kind: ClusterRole
+  name: security-auditor
+  apiGroup: rbac.authorization.k8s.io

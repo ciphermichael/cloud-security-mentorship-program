@@ -1,0 +1,154 @@
+# Custom Falco Rules — Container Security Framework
+# Project: 10-container-security-framework
+# Install: copy to /etc/falco/rules.d/ or reference in falco.yaml
+# Test: falco -r custom_container_rules.yaml --validate
+
+# ── Macros ────────────────────────────────────────────────────────────────────
+- macro: container_not_host
+  condition: container.id != host
+
+- macro: shell_procs
+  condition: proc.name in (bash, sh, zsh, ksh, fish, dash)
+
+- macro: known_monitoring_tools
+  condition: proc.name in (prometheus, node_exporter, cadvisor, datadog-agent)
+
+# ── Rule 1: Shell spawned inside container ────────────────────────────────────
+- rule: Shell Spawned in Container
+  desc: >
+    A shell was spawned inside a running container. Legitimate applications do not
+    need shells at runtime. This may indicate `kubectl exec`, web shell, or RCE.
+  condition: >
+    container_not_host
+    and spawned_process
+    and shell_procs
+    and not proc.pname in (entrypoint.sh, start.sh, docker-entrypoint)
+  output: >
+    Shell spawned in container
+    (user=%user.name user_uid=%user.uid container=%container.name
+     image=%container.image.repository shell=%proc.name
+     parent=%proc.pname cmdline=%proc.cmdline)
+  priority: WARNING
+  tags: [container, shell, T1059, mitre_execution]
+
+# ── Rule 2: Read sensitive file inside container ──────────────────────────────
+- rule: Sensitive File Read in Container
+  desc: >
+    A process inside a container read a sensitive host file that was mounted.
+    This may indicate container escape or credential theft.
+  condition: >
+    container_not_host
+    and open_read
+    and fd.name in (/etc/shadow, /etc/passwd, /root/.ssh/id_rsa,
+                    /root/.aws/credentials, /var/run/secrets/kubernetes.io/serviceaccount/token)
+  output: >
+    Sensitive file read inside container
+    (file=%fd.name user=%user.name proc=%proc.name
+     container=%container.name image=%container.image.repository)
+  priority: ERROR
+  tags: [container, filesystem, T1003, mitre_credential_access]
+
+# ── Rule 3: Docker socket accessed from container ─────────────────────────────
+- rule: Docker Socket Accessed in Container
+  desc: >
+    A process inside a container accessed the Docker daemon socket.
+    If the socket is mounted, the container can escape to the host.
+  condition: >
+    container_not_host
+    and (open_read or open_write)
+    and fd.name = /var/run/docker.sock
+  output: >
+    Docker socket accessed in container — container escape risk
+    (proc=%proc.name user=%user.name
+     container=%container.name image=%container.image.repository)
+  priority: CRITICAL
+  tags: [container, escape, T1611, mitre_privilege_escalation]
+
+# ── Rule 4: Unexpected outbound network connection ────────────────────────────
+- rule: Unexpected Outbound Connection from Container
+  desc: >
+    A container connected to an external IP on an unexpected port.
+    May indicate C2 communication or data exfiltration.
+  condition: >
+    container_not_host
+    and outbound
+    and not known_monitoring_tools
+    and not fd.sip in (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+    and fd.sport not in (80, 443, 8080, 8443, 9090, 9093)
+  output: >
+    Unexpected outbound connection from container
+    (proc=%proc.cmdline container=%container.name
+     image=%container.image.repository
+     dest=%fd.sip:%fd.sport user=%user.name)
+  priority: WARNING
+  tags: [container, network, T1043, mitre_command_and_control]
+
+# ── Rule 5: Write to sensitive directory in container ─────────────────────────
+- rule: Write to /etc or /bin in Container
+  desc: >
+    A process inside a container wrote to /etc, /bin, /sbin, or /usr/bin.
+    Legitimate containers with --read-only should never do this.
+  condition: >
+    container_not_host
+    and open_write
+    and (fd.name startswith /etc/
+         or fd.name startswith /bin/
+         or fd.name startswith /sbin/
+         or fd.name startswith /usr/bin/)
+    and not proc.name in (apt, apt-get, yum, dnf, apk, pip, pip3, npm)
+  output: >
+    Write to sensitive directory inside container
+    (file=%fd.name proc=%proc.name user=%user.name
+     container=%container.name image=%container.image.repository)
+  priority: WARNING
+  tags: [container, filesystem, T1036, mitre_defence_evasion]
+
+# ── Rule 6: Setuid binary executed in container ───────────────────────────────
+- rule: Setuid Binary Executed in Container
+  desc: >
+    A setuid binary was executed inside a container.
+    This can lead to privilege escalation to root within the container.
+  condition: >
+    container_not_host
+    and spawned_process
+    and proc.is_suid = true
+    and not proc.name in (sudo, su, newgrp, passwd, chsh, ping)
+  output: >
+    Setuid binary executed in container
+    (proc=%proc.name user=%user.name uid=%user.uid
+     container=%container.name image=%container.image.repository)
+  priority: ERROR
+  tags: [container, privilege_escalation, T1548.001, mitre_privilege_escalation]
+
+# ── Rule 7: Crontab modification inside container ─────────────────────────────
+- rule: Crontab Modified in Container
+  desc: >
+    A cron job was added or modified inside a container.
+    Legitimate containers should not need persistence mechanisms.
+  condition: >
+    container_not_host
+    and open_write
+    and (fd.name startswith /etc/cron
+         or fd.name startswith /var/spool/cron
+         or fd.name = /etc/crontab)
+  output: >
+    Crontab modified in container — potential persistence
+    (file=%fd.name proc=%proc.name user=%user.name
+     container=%container.name image=%container.image.repository)
+  priority: WARNING
+  tags: [container, persistence, T1053, mitre_persistence]
+
+# ── Rule 8: Kernel module load attempt from container ─────────────────────────
+- rule: Kernel Module Load Attempt in Container
+  desc: >
+    A process inside a container attempted to load a kernel module.
+    This requires SYS_MODULE capability and can be used to escape.
+  condition: >
+    container_not_host
+    and syscall.type in (init_module, finit_module)
+  output: >
+    Kernel module load attempt from container
+    (proc=%proc.name user=%user.name
+     container=%container.name image=%container.image.repository)
+  priority: CRITICAL
+  tags: [container, kernel, T1215, mitre_privilege_escalation]

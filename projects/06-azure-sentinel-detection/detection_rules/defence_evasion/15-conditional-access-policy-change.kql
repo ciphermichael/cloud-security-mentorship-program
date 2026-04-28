@@ -1,0 +1,20 @@
+// Rule 15 — Conditional Access Policy Modified or Disabled
+// CA policy change may weaken security controls — potential defence evasion
+// MITRE: T1556 — Modify Auth Process | Tactic: Defence Evasion
+// Severity: High | Schedule: Every 15 min | Lookback: 1 hour
+
+AuditLogs
+| where TimeGenerated > ago(1h)
+| where OperationName in (
+    "Add conditional access policy",
+    "Update conditional access policy",
+    "Delete conditional access policy"
+  )
+| where Result == "success"
+| extend
+    PolicyName = tostring(TargetResources[0].displayName),
+    Actor      = tostring(InitiatedBy.user.userPrincipalName),
+    ActorIP    = tostring(InitiatedBy.user.ipAddress),
+    ChangeType = OperationName
+| project TimeGenerated, Actor, ActorIP, ChangeType, PolicyName
+| order by TimeGenerated desc

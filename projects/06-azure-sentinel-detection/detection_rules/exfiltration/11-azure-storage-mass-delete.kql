@@ -1,0 +1,16 @@
+// Rule 11 — Azure Storage Mass Blob Deletion
+// Bulk deletion of storage blobs — potential ransomware or destructive attack
+// MITRE: T1485 — Data Destruction | Tactic: Impact
+// Severity: High | Schedule: Every 30 min | Lookback: 1 hour
+
+let delete_threshold = 50;
+
+StorageBlobLogs
+| where TimeGenerated > ago(1h)
+| where OperationName == "DeleteBlob"
+| summarize
+    DeleteCount  = count(),
+    Containers   = make_set(Uri, 10)
+  by AccountName, CallerIpAddress, bin(TimeGenerated, 10m)
+| where DeleteCount >= delete_threshold
+| order by DeleteCount desc

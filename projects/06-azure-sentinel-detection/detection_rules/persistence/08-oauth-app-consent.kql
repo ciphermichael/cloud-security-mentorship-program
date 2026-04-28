@@ -1,0 +1,21 @@
+// Rule 08 — OAuth App Consent Phishing
+// User consents to an OAuth application with dangerous permissions — phishing indicator
+// MITRE: T1528 — Steal Application Access Token | Tactic: Credential Access
+// Severity: High | Schedule: Every 1 hour | Lookback: 24 hours
+
+AuditLogs
+| where TimeGenerated > ago(24h)
+| where OperationName == "Consent to application"
+| where Result == "success"
+| extend
+    AppName     = tostring(TargetResources[0].displayName),
+    User        = tostring(InitiatedBy.user.userPrincipalName),
+    Permissions = tostring(
+        parse_json(tostring(TargetResources[0].modifiedProperties))[0].newValue
+    )
+| where Permissions has_any (
+    "Mail.Read", "Mail.ReadWrite", "Files.ReadWrite",
+    "offline_access", "User.ReadWrite.All", "Directory.ReadWrite.All"
+  )
+| project TimeGenerated, User, AppName, Permissions
+| order by TimeGenerated desc

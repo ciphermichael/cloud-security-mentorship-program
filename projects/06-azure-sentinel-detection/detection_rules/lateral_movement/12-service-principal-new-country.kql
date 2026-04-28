@@ -1,0 +1,26 @@
+// Rule 12 — Service Principal Sign-in from New Country
+// Application identity accessing from a country not seen in past 30 days
+// MITRE: T1078.004 — Cloud Accounts | Tactic: Lateral Movement
+// Severity: Medium | Schedule: Every 1 hour | Lookback: 24 hours
+
+let baseline_period = 30d;
+let detection_window = 24h;
+
+let known_countries = AADServicePrincipalSignInLogs
+| where TimeGenerated between (ago(baseline_period) .. ago(detection_window))
+| where ResultType == 0
+| summarize KnownCountries = make_set(Location) by ServicePrincipalName;
+
+AADServicePrincipalSignInLogs
+| where TimeGenerated > ago(detection_window)
+| where ResultType == 0
+| join kind=leftouter known_countries on ServicePrincipalName
+| extend IsNewCountry = not(Location in (KnownCountries))
+| where IsNewCountry == true
+| project
+    TimeGenerated,
+    ServicePrincipalName,
+    NewCountry = Location,
+    KnownCountries,
+    IPAddress
+| order by TimeGenerated desc

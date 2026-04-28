@@ -1,0 +1,28 @@
+// Rule 20 — Suspicious Sign-in to Azure Management Portal
+// High-privilege portal access from user who rarely uses it
+// MITRE: T1078 — Valid Accounts | Tactic: Initial Access
+// Severity: Medium | Schedule: Every 1 hour | Lookback: 24 hours
+
+let baseline_period = 30d;
+let detection_window = 24h;
+
+let infrequent_portal_users = SigninLogs
+| where TimeGenerated between (ago(baseline_period) .. ago(detection_window))
+| where AppDisplayName == "Azure Portal"
+| where ResultType == "0"
+| summarize PortalLogins = count() by UserPrincipalName
+| where PortalLogins < 3;  // Users who use the portal < 3 times in 30 days
+
+SigninLogs
+| where TimeGenerated > ago(detection_window)
+| where AppDisplayName == "Azure Portal"
+| where ResultType == "0"
+| join kind=inner infrequent_portal_users on UserPrincipalName
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    IPAddress,
+    Country       = tostring(LocationDetails.countryOrRegion),
+    PortalLoginsBaseline = PortalLogins,
+    UserAgent
+| order by TimeGenerated desc

@@ -1,0 +1,43 @@
+// Rule 01 — Impossible Travel Login
+// Detects a user signing in from two geographically distant locations within 1 hour
+// MITRE: T1078 — Valid Accounts | Tactic: Initial Access
+// Severity: High | Schedule: Every 1 hour | Lookback: 24 hours
+
+let travel_speed_km_h = 800.0;
+let min_distance_km = 200.0;
+
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == "0"
+| where isnotempty(LocationDetails.countryOrRegion)
+| project
+    UserPrincipalName,
+    TimeGenerated,
+    Country = tostring(LocationDetails.countryOrRegion),
+    City    = tostring(LocationDetails.city),
+    Lat     = todouble(LocationDetails.geoCoordinates.latitude),
+    Lon     = todouble(LocationDetails.geoCoordinates.longitude),
+    IPAddress
+| order by UserPrincipalName asc, TimeGenerated asc
+| serialize
+| extend
+    PrevUser    = prev(UserPrincipalName),
+    PrevTime    = prev(TimeGenerated),
+    PrevCountry = prev(Country),
+    PrevLat     = prev(Lat),
+    PrevLon     = prev(Lon)
+| where UserPrincipalName == PrevUser
+| extend
+    TimeDiffH   = datetime_diff('minute', TimeGenerated, PrevTime) / 60.0,
+    DistanceKm  = geo_distance_2points(Lon, Lat, PrevLon, PrevLat) / 1000.0
+| where PrevCountry != Country and DistanceKm > min_distance_km
+| extend SpeedKmH = DistanceKm / max_of(TimeDiffH, 0.001)
+| where SpeedKmH > travel_speed_km_h
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    Country, PrevCountry,
+    DistanceKm = round(DistanceKm, 0),
+    SpeedKmH   = round(SpeedKmH, 0),
+    IPAddress
+| order by SpeedKmH desc

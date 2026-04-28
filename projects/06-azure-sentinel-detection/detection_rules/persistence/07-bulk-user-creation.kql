@@ -1,0 +1,19 @@
+// Rule 07 — Bulk User Account Creation
+// More than 5 users created by the same actor within 1 hour — potential persistence
+// MITRE: T1136 — Create Account | Tactic: Persistence
+// Severity: High | Schedule: Every 1 hour | Lookback: 1 hour
+
+AuditLogs
+| where TimeGenerated > ago(1h)
+| where OperationName == "Add user"
+| where Result == "success"
+| extend
+    Actor    = tostring(InitiatedBy.user.userPrincipalName),
+    ActorIP  = tostring(InitiatedBy.user.ipAddress),
+    NewUser  = tostring(TargetResources[0].userPrincipalName)
+| summarize
+    UsersCreated = count(),
+    UserList     = make_set(NewUser, 20)
+  by Actor, ActorIP, bin(TimeGenerated, 1h)
+| where UsersCreated > 5
+| order by UsersCreated desc

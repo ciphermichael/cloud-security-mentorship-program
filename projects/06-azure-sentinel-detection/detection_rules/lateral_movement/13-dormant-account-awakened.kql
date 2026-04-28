@@ -1,0 +1,27 @@
+// Rule 13 — Dormant Account Awakened
+// User who has not signed in for 90+ days suddenly becomes active
+// MITRE: T1078 — Valid Accounts | Tactic: Initial Access / Lateral Movement
+// Severity: Medium | Schedule: Every 4 hours | Lookback: 24 hours
+
+let dormancy_threshold = 90d;
+
+let dormant_users = SigninLogs
+| where TimeGenerated between (ago(365d) .. ago(dormancy_threshold))
+| where ResultType == "0"
+| summarize LastLogin = max(TimeGenerated) by UserPrincipalName
+| where LastLogin < ago(dormancy_threshold);
+
+SigninLogs
+| where TimeGenerated > ago(24h)
+| where ResultType == "0"
+| join kind=inner dormant_users on UserPrincipalName
+| extend DormantDays = datetime_diff('day', TimeGenerated, LastLogin)
+| project
+    TimeGenerated,
+    UserPrincipalName,
+    LastLogin,
+    DormantDays,
+    IPAddress,
+    Country = tostring(LocationDetails.countryOrRegion),
+    AppDisplayName
+| order by DormantDays desc

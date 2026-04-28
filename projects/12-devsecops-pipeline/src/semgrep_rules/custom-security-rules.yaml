@@ -1,0 +1,101 @@
+rules:
+  # ── SQL Injection ───────────────────────────────────────────────────────────
+  - id: sql-injection-fstring
+    patterns:
+      - pattern: $CURSOR.execute(f"...{$VAR}...")
+      - pattern: $CURSOR.execute("..." + $VAR + "...")
+    message: >
+      SQL injection via string concatenation. Use parameterised queries:
+      cursor.execute('SELECT * FROM t WHERE id = ?', (value,))
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-89
+      owasp: A03:2021
+
+  # ── Command Injection ───────────────────────────────────────────────────────
+  - id: shell-true-command-injection
+    patterns:
+      - pattern: subprocess.run(..., shell=True, ...)
+      - pattern: subprocess.call(..., shell=True, ...)
+      - pattern: subprocess.check_output(..., shell=True, ...)
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+    message: >
+      shell=True enables command injection via user input.
+      Use a list of arguments: subprocess.run(["cmd", arg], shell=False)
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-78
+      owasp: A03:2021
+
+  # ── Hardcoded Secret ────────────────────────────────────────────────────────
+  - id: hardcoded-secret-assignment
+    patterns:
+      - pattern: $KEY = "..."
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)(password|passwd|secret|api_key|apikey|token|auth|credential)
+      - metavariable-regex:
+          metavariable: $VALUE
+          regex: .{8,}
+    message: >
+      Hardcoded secret in variable "{{$KEY}}".
+      Use environment variables or a secrets manager (Vault, AWS Secrets Manager).
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-798
+
+  # ── Eval Usage ──────────────────────────────────────────────────────────────
+  - id: no-eval
+    patterns:
+      - pattern: eval(...)
+    message: >
+      eval() executes arbitrary code — dangerous with user input.
+      Refactor to use safe alternatives.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-95
+
+  # ── Weak Cryptography ────────────────────────────────────────────────────────
+  - id: weak-hash-md5-sha1-passwords
+    patterns:
+      - pattern: hashlib.md5(...).hexdigest()
+      - pattern: hashlib.sha1(...).hexdigest()
+    message: >
+      MD5/SHA1 are broken for password hashing.
+      Use bcrypt, scrypt, or argon2: pip install bcrypt
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-916
+
+  # ── AWS Region Hardcoded ─────────────────────────────────────────────────────
+  - id: no-hardcoded-aws-region
+    pattern: boto3.client("...", region_name="us-east-1")
+    message: >
+      Hardcoded AWS region. Use os.environ.get('AWS_REGION', 'us-east-1')
+    severity: WARNING
+    languages: [python]
+    metadata:
+      category: maintainability
+
+  # ── Debug Mode Flask ─────────────────────────────────────────────────────────
+  - id: flask-debug-true
+    pattern: app.run(..., debug=True, ...)
+    message: >
+      Flask debug=True in production exposes an interactive debugger.
+      Use debug=False or let FLASK_DEBUG environment variable control this.
+    severity: ERROR
+    languages: [python]
+    metadata:
+      category: security
+      cwe: CWE-94
